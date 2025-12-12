@@ -445,8 +445,7 @@ class NonlinearBackup {
 }
 
 
-; #HotIf isWinActive('AutoHotKey64', NonlinearBackup.appName '*')
-#HotIf isWinActive('backup', NonlinearBackup.appName '*')
+#HotIf WinActive(NonlinearBackup.appName ' ahk_class AutoHotkeyGUI')
 Enter:: cmdMap['Enter'].Call()
 ^Up:: cmdMap['CtrlUp'].Call()
 ^Down:: cmdMap['CtrlDown'].Call()
