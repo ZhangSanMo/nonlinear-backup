@@ -1,4 +1,4 @@
-#Include arrays.ahk
+﻿#Include arrays.ahk
 
 extendClass(String, NewString)
 class NewString {

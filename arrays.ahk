@@ -1,4 +1,4 @@
-#Include seq.ahk
+﻿#Include seq.ahk
 
 Array.Prototype.Base := NewArray
 class NewArray extends Iterable {

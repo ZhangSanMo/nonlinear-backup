@@ -1,27 +1,6 @@
-#SingleInstance Force
-#Include files.ahk
-
-
-ListLines false
-KeyHistory 0
+﻿#Include utils.ahk
 
 globalGui := unset
-
-nothing(*) {
-}
-
-display(x, sec := 3, followGui := false) {
-    msg := repr(x)
-    static displaying := ''
-    displaying := displaying ? displaying '`n' msg : msg
-    if followGui {
-        ToolTip(displaying, 0, -14)
-    } else {
-        ToolTip(displaying)
-    }
-    SetTimer(() => (displaying := '', ToolTip()), -1000 * sec)
-    return msg
-}
 
 makeGlobalGui(title?, font := 'consolas', fontOpt := 's10') {
     global globalGui
@@ -52,17 +31,13 @@ exitGui(g?, preAction?) {
     if IsSet(preAction) {
         preAction(globalGui)
     }
-    globalGui.Destroy()
+    if IsSet(globalGui)
+        globalGui.Destroy()
     globalGui := unset
 }
 
 showGui() {
     globalGui.Show('AutoSize')
-}
-
-centerWindow() {
-    WinGetPos(, , &width, &height, 'A')
-    WinMove(A_ScreenWidth / 2 - width / 2, A_ScreenHeight / 2 - height / 2, , , 'A')
 }
 
 wrapCmd(gc, callback) {
@@ -125,82 +100,9 @@ lvGetAllSelected(lv) {
     return EnumSeq(fun)
 }
 
-formatError(e) {
-    return Type(e) ': ' e.Message (e.Extra != '' ? ' (' e.Extra ')' : '')
-}
-
-execSelection() {
-    expression := copySelection()
-    if not expression {
-        return
-    }
-    toStdOut(s) {
-        return 'FileAppend(repr((' s ')), "*")'
-    }
-    if InStr(expression, '`n') {
-        lines := StrSplit(expression, '`n', ' `t`r')
-        for i in range(lines.Length, 1, -1) {
-            if lines[i] {
-                lines[i] := toStdOut(lines[i])
-                break
-            }
-        }
-        content := lines.join('`n')
-    } else {
-        content := toStdOut(expression)
-    }
-    static shell := ComObject('WScript.Shell')
-    exec := shell.Exec(A_AhkPath ' /ErrorStdOut *')
-    script := Format("
-    (
-        #Warn All, Off
-        #Include {1}
-        try {
-            {2}
-        } catch Error as e {
-            FileAppend(formatError(e), '*')
-        }
-        ExitApp
-    )", A_ScriptFullPath, content)
-    exec.StdIn.WriteLine(script)
-    exec.StdIn.Close()
-    return exec.StdOut.ReadAll()
-}
-
-toExe(name) {
-    return 'ahk_exe ' name '.exe'
-}
-
-procName() {
-    return SubStr(WinGetProcessName('A'), 1, -4)
-}
-
 gcGetWinId(gc, &id) {
     try {
         return id := 'ahk_id ' ControlGetHwnd(gc)
     } catch Error {
     }
 }
-
-isWinTitleMatch(pattern) {
-    return WinGetTitle('A').isWildcardMatch(pattern)
-}
-
-isWinActive(procName, titlePattern?) {
-    return WinActive(toExe(procName)) and (
-        not IsSet(titlePattern) or not titlePattern
-        or isWinTitleMatch(titlePattern)
-    )
-}
-
-
-#F5:: Reload
-#F8:: doCopy(display(procName()))
-#F9:: doCopy(display(WinGetTitle('A')))
-#F12:: doCopy(display(execSelection()))
-
-
-; listViewAll(['a', 'b', 'c'], [['jifdajifjdaijfjjijijif', 'fsdajifdajofjaosuff', 'jijfidajifjaifjiaufodiuafiufasof']])
-; listViewAll(['a', 'b', 'c'], [['jifdajifjdaijfj', 'fsda', 'jijfidajifjaifjia']])
-; listViewAll(['a', 'b', 'c'], [['jij', 'fsj', 'jij']])
-; listViewAll(['a', 'b', 'c'], [['人间四月芳菲尽', '一蓑烟雨任平生', 'jijfidajifjaifjiaufodiuafiufasof']])

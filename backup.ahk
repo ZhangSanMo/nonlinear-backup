@@ -1,72 +1,219 @@
-#SingleInstance Force
+﻿#SingleInstance Force
+#Include utils.ahk
 #Include gui.ahk
+#Include files.ahk
 
+; 初始化全局应用实例
+global App := BackupApp()
 
-cmdMap := (['Enter', 'CtrlUp', 'CtrlDown', 'Del', 'RButton']).toMapWith(name => nothing)
-treeListView := unset
+; ==============================================================================
+; 快捷键定义 (Hotkeys)
+; ==============================================================================
 
-quit(msg) {
-    display(msg)
-    SetTimer(ExitApp, -2900)
-}
+; 仅在备份程序的 GUI 激活时生效
+#HotIf WinActive(App.title ' ahk_class AutoHotkeyGUI')
+Enter:: App.execCmd('Enter')
+^Up::   App.execCmd('CtrlUp')
+^Down:: App.execCmd('CtrlDown')
+Del::   App.execCmd('Del')
+RButton::App.execCmd('RButton')
+F1::    App.showHelp()
+#HotIf
 
-backupIni := 'backup.ini'
-if not FileExist(backupIni) {
-    quit('同目录下缺失"' backupIni '"文件')
-    return
-}
+; 全局快捷键
+#F5:: Reload  ; 重载脚本
+#F6:: App.runHelper(bh => bh.saveFiles())       ; 新建备份
+#F7:: App.runHelper(bh => bh.showSaves(false))  ; 查看存档树
+#F8:: doCopy(display(procName()))               ; 复制当前进程名
+#F9:: doCopy(display(WinGetTitle('A')))         ; 复制当前窗口标题
 
-parseConfig(head, rest) {
-    proc := SubStr(head, 2, StrLen(head) - 2)
-    if not rest {
-        quit('未找到配置：' proc)
-        stop()
+; ==============================================================================
+; 主应用类 (BackupApp)
+; ==============================================================================
+
+class BackupApp {
+    appName := '非线性备份'
+    backupIni := 'backup.ini'
+    
+    ; 运行时状态
+    cmdMap := Map()
+    procMap := Map()
+    treeListView := ""
+
+    __New() {
+        this.title := this.appName
+        this.initCmdMap()
+        this.loadConfig()
     }
-    configMap := rest
-        .map(StrSplit.Bind(, '=', ' `t', 2))
-        .filter(a => a.Length == 2)
-        .toMap(a => a[1], a => a[2])
-    if not configMap.getVal('dir', &dir) {
-        quit('缺失存档路径 dir: ' proc)
-        stop()
+
+    ; 初始化按键映射 (默认不做任何事)
+    initCmdMap() {
+        this.cmdMap := (['Enter', 'CtrlUp', 'CtrlDown', 'Del', 'RButton']).toMapWith(name => nothing)
     }
-    dir := StrReplace(dir, '{user}', A_UserName)
-    if not FileExist(dir) {
-        quit('存档路径不存在：' dir)
-        stop()
+
+    ; 加载并解析 backup.ini
+    loadConfig() {
+        if not FileExist(this.backupIni) {
+            fatalExit('同目录下缺失 "' this.backupIni '" 文件')
+        }
+
+        ; 读取配置文件，按小节分组
+        lines := seqReadlines(this.backupIni)
+            .filter(ln => ln and not ln.startsWith(';'))
+            .mapSub(ln => ln.surroundedWith('[', ']'), (h, r) => this.parseSection(h, r))
+            .toArr() 
+        
+        this.procMap := Map()
+        for item in lines {
+            name := item[1] ; 进程名 (e.g., "Code")
+            cfg := item[2]  ; 配置 Map
+            if !this.procMap.Has(name)
+                this.procMap[name] := []
+            this.procMap[name].Push(cfg)
+        }
+
+        if this.procMap.Count == 0 {
+            fatalExit('backup.ini 中无有效配置')
+        }
     }
-    configMap['dir'] := dir
-    return [proc, configMap]
+
+    ; 解析单个配置块 [Header]...
+    parseSection(head, rest) {
+        fullSection := SubStr(head, 2, StrLen(head) - 2)
+        parts := StrSplit(fullSection, ':', , 2)
+        procName := parts[1]
+        
+        ; 解析键值对
+        configMap := rest
+            .map(StrSplit.Bind(, '=', ' `t', 2))
+            .filter(a => a.Length == 2)
+            .toMap(a => a[1], a => a[2])
+            
+        ; 校验必要字段 dir
+        if not configMap.getVal('dir', &dir) {
+            fatalExit('配置 [' fullSection '] 缺失存档路径 dir')
+        }
+        
+        dir := StrReplace(dir, '{user}', A_UserName)
+        if not FileExist(dir) {
+            fatalExit('存档路径不存在：' dir)
+        }
+        configMap['dir'] := dir
+        configMap['section_name'] := fullSection
+        
+        return [procName, configMap]
+    }
+
+    ; 执行当前 GUI 绑定的命令
+    execCmd(key) {
+        if this.cmdMap.Has(key)
+            this.cmdMap[key].Call()
+    }
+
+    ; 退出 GUI 并显示消息
+    exitGuiWith(msg, sec) {
+        exitGui(, g => display(msg, sec, true))
+        this.initCmdMap() ; 重置命令防止误触
+    }
+
+    ; 核心入口：根据当前环境选择配置并运行操作
+    runHelper(action) {
+        proc := procName()
+        if not this.procMap.Has(proc)
+            return
+            
+        configs := this.procMap[proc]
+        targetConfig := unset
+        activeTitle := WinGetTitle('A')
+        
+        ; 匹配逻辑：
+        ; 1. 优先匹配 match_title (支持正则/通配符)
+        ; 2. 否则使用第一个没有 match_title 的配置作为默认
+        for cfg in configs {
+            matchTitle := cfg.Get('match_title', '')
+            if matchTitle != '' {
+                if activeTitle.isWildcardMatch(matchTitle) {
+                    targetConfig := cfg
+                    break ; 找到精确匹配，立即停止
+                }
+            } else if not IsSet(targetConfig) {
+                targetConfig := cfg ; 暂存默认配置
+            }
+        }
+        
+        if IsSet(targetConfig) {
+             ; 兼容旧版 hotkey 限定逻辑 (如果配置了 title 字段)
+            configTitle := targetConfig.Get('title', '')
+            if not configTitle or activeTitle.isWildcardMatch(configTitle) {
+                action(NonlinearBackup(proc, targetConfig, this))
+            }
+        }
+    }
+
+    showHelp() {
+        g := makeGui('快捷键列表', g => g.Destroy())
+        g.SetFont('s9', 'consolas')
+        g.Opt('ToolWindow')
+        content := "
+        (
+            游戏或工作界面
+            Win+F5  : 重新加载配置
+            Win+F6  : 新建存档备份
+            Win+F7  : 打开存档树
+            Win+F8  : 获取当前程序名
+            Win+F9  : 获取当前窗口标题
+            
+            本应用界面
+            ESC     : 退出当前窗口
+            F1      : 快捷键列表
+            
+            存档树界面
+            ↑/↓     : 选择存档
+            Ctrl+↑  : 跳转最新子节点
+            Ctrl+↓  : 跳转父节点
+            Enter   : 载入/保存
+            Delete  : 删除存档
+            RButton : 重设父节点
+        )"
+        g.AddText('w210', content)
+        g.Show()
+    }
 }
 
-procMap := seqReadlines(backupIni)
-    .filter(ln => ln and not ln.startsWith(';'))
-    .mapSub(ln => ln.surroundedWith('[', ']'), parseConfig)
-    .toMap(a => a[1], a => a[2])
-
-if procMap.Count == 0 {
-    quit('无存档配置')
-    return
-}
-
-exitGuiWith(msg, sec) {
-    exitGui(, g => display(msg, sec, true))
-    for k in cmdMap {
-        cmdMap[k] := nothing
-    }
-}
+; ==============================================================================
+; 备份逻辑类 (NonlinearBackup)
+; ==============================================================================
 
 class NonlinearBackup {
-    static appName := '非线性备份'
     static autoFunc := 'autoFunc'
     static autoText := 'autoText'
 
-    __New(proc, config) {
+    __New(proc, config, appInstance) {
         this.proc := proc
-        this.target := A_WorkingDir '\' proc
+        this.config := config
+        this.app := appInstance
         this.src := config['dir']
-        this.title := config.Get('title', '')
-        this.pattern := config.Get('pattern', '*')
+        
+        ; 计算目标存储路径
+        ; 修改：添加 saveRoot 变量指向 Save 子文件夹
+        saveRoot := A_WorkingDir '\Save'
+        
+        ; 如果配置头是 [Code:ProjectA]，文件夹名为 Code_ProjectA
+        if (config.Has('section_name') && InStr(config['section_name'], ':')) {
+            safeTag := RegExReplace(StrSplit(config['section_name'], ':',,2)[2], '[\\/:*?"<>|]', '_')
+            this.target := saveRoot '\' proc '_' safeTag
+        } else {
+            this.target := saveRoot '\' proc
+        }
+        
+        if !DirExist(this.target)
+            DirCreate(this.target)
+
+        ; 初始化 PatternMatch (支持 | 分隔多行规则)
+        rawPattern := config.Get('pattern', '*')
+        patternLines := StrReplace(rawPattern, '|', '`n')
+        this.matcher := PatternMatch(patternLines)
+        
         this.hotkey := config.Get('hotkey', '')
         this.keywait := config.getNum('keywait', &kw) ? kw : 0
         this.load()
@@ -78,18 +225,18 @@ class NonlinearBackup {
     }
 
     getAppTitle() {
-        if procMap.getVal(this.proc, &config) {
-            if config.getVal(NonlinearBackup.autoText, &text) {
-                return NonlinearBackup.appName ' (' text ')'
-            }
+        title := this.app.appName
+        if this.config.getVal(NonlinearBackup.autoText, &text) {
+            title .= ' (' text ')'
         }
-        return NonlinearBackup.appName
+        return title
     }
 
     loadHead() {
         return scanFiles(this.target).find(&res, f => not fileExt(f)) ? fileName(res) : ''
     }
 
+    ; 加载所有存档节点
     load() {
         this.saves := scanFilesLatest(this.target, , 'D').mapOut(fileName)
         this.entries := this.saves.mapOut(f => StrSplit(f, '#', , 3))
@@ -101,79 +248,98 @@ class NonlinearBackup {
         return node and this.nodeIndexMap.getVal(node, &index)
     }
 
-    askRename(saveName, entry) {
-        if popupYesNo('重命名存档', '已有存档: ' entry[3] '`n是否重命名') {
-            this.renameSave(this.saves[1], entry[1], entry[2], saveName)
-            exitGuiWith(saveName ' - 已重命名', 3)
-        }
-    }
-
+    ; 执行保存逻辑
     doSave(saveName, auto, &msg) {
-        srcFiles := scanFiles(this.src, this.pattern).toArr()
+        ; 1. 递归扫描所有源文件
+        allFiles := scanFiles(this.src, '*', 'FR')
+        
+        ; 2. 使用 PatternMatch 过滤 (基于相对路径)
+        srcLen := StrLen(this.src)
+        srcFiles := allFiles.filter(f => this.matcher.IsMatch(SubStr(filePath(f), srcLen + 1))).toArr()
+
+        if srcFiles.Length == 0 {
+             msg := '没有匹配的文件'
+             return false
+        }
+
         if not srcFiles.map(fileModifiedTime).max(&latestTime) {
-            msg := '无可备份文件'
+            msg := '无法获取文件时间'
             return false
         }
+        
         timestamp := timeEncode(latestTime)
+        
+        ; 检查是否与最新存档重复
         if this.entries.first(&fst) and timestamp == fst[1] {
             if not auto {
-                this.askRename(saveName, fst)
+                if popupYesNo('重命名存档', '内容未变，已有存档: ' fst[3] '`n是否重命名?') {
+                    this.renameSave(this.saves[1], fst[1], fst[2], saveName)
+                    this.app.exitGuiWith(saveName ' - 已重命名', 3)
+                }
             }
             return false
         }
+
         head := this.loadHead()
         if timestamp == head {
-            if not auto and this.getIndex(head, &headIndex) {
-                this.askRename(saveName, this.entries[headIndex])
+             if not auto and this.getIndex(head, &headIndex) {
+                 if popupYesNo('重命名存档', 'HEAD 指针重合: ' this.entries[headIndex][3] '`n是否重命名?') {
+                    this.renameSave(this.saves[headIndex], head, this.entries[headIndex][2], saveName)
+                    this.app.exitGuiWith(saveName ' - 已重命名', 3)
+                 }
             }
             return false
         }
-        if not auto {
-            if this.entries.any(e => e[3] == saveName) {
-                msg := '存档已存在'
-                return false
-            }
+
+        if not auto and this.entries.any(e => e[3] == saveName) {
+            msg := '存档名称已存在'
+            return false
         }
+
         if this.hotkey {
-            if isWinActive(this.proc, this.title) {
+            if isWinActive(this.proc) {
                 SendInput(this.hotkey)
                 Sleep((this.keywait or 1) * 1000)
             }
         }
-        filesBackup(this.target, timestamp '#' head '#' saveName, srcFiles.map(filePath))
+        
+        ; 3. 执行结构化备份
+        filesBackupStructured(this.target, timestamp '#' head '#' saveName, this.src, srcFiles.map(filePath))
+        
         this.setHead(timestamp)
-        if IsSet(treeListView) {
-            if gcGetWinId(treeListView, &lvId) and WinExist(lvId) {
-                selections := lvGetAllSelected(treeListView).mapOut(i => i + 1)
-                this.showSaves(true, selections*)
-            } else {
-                global treeListView
-                treeListView := unset
-            }
+        
+        ; 刷新 TreeView 如果存在
+        lv := this.app.treeListView 
+        if lv && WinExist(gcGetWinId(lv, &id) ? id : 0) {
+            selections := lvGetAllSelected(lv).mapOut(i => i + 1)
+            this.showSaves(true, selections*)
         }
+        
         return true
     }
 
+    ; 检查并设置自动备份
     checkAuto(saveName, &msg) {
         if not saveName.startsWith('=') {
             return false
         }
         sub := SubStr(saveName, 2)
         if sub.isFullMatch('[+-]?[0-9]+[hHmMsS]') {
-            config := procMap[this.proc]
+            config := this.config
             len := StrLen(sub)
             num := Integer(SubStr(sub, 1, len - 1))
+            
             if num == 0 {
                 if config.getVal(NonlinearBackup.autoFunc, &timer) {
                     SetTimer(timer, 0)
                     NonlinearBackup.clearAuto(config)
-                    exitGuiWith('关闭自动备份', 3)
-                    return true
-                } else {
-                    msg := '自动备份未开启'
+                    this.app.exitGuiWith('关闭自动备份', 3)
                     return true
                 }
+                msg := '自动备份未开启'
+                return true
             }
+            
             unit := SubStr(sub, len)
             millis := num * 1000
             if unit = 'm' {
@@ -181,30 +347,32 @@ class NonlinearBackup {
             } else if unit = 'h' {
                 millis *= 3600
             }
-            config := procMap[this.proc]
+            
             if config.getVal(NonlinearBackup.autoFunc, &old) {
                 SetTimer(old, 0)
             }
+            
             f() {
                 if this.doSave(String(A_Now), true, &_) {
                     display(this.proc ' - 已自动备份')
                 }
                 this.load()
-                if num < 0 {
+                if num < 0 { ; 负数表示仅运行一次
                     NonlinearBackup.clearAuto(config)
                 }
             }
+            
             config[NonlinearBackup.autoFunc] := f
             config[NonlinearBackup.autoText] := sub
             SetTimer(f, millis)
-            exitGuiWith((num > 0 ? '开启自动备份：' : '预约备份：') sub, 3)
+            this.app.exitGuiWith((num > 0 ? '开启自动备份：' : '预约备份：') sub, 3)
             return true
-        } else {
-            msg := '自动备份语法错误'
-            return true
-        }
+        } 
+        msg := '自动备份语法错误'
+        return true
     }
 
+    ; GUI: 输入备份名
     saveFiles() {
         g := makeGlobalGui(this.getAppTitle(), '微软雅黑')
         gc := g.AddEdit('r1 w300', '新建备份')
@@ -215,39 +383,39 @@ class NonlinearBackup {
             if this.checkAuto(saveName, &autoMsg) {
                 return IsSet(autoMsg) ? autoMsg : ''
             }
+            
             if saveName.isFullMatch('\s*') {
-                return '不允许空文件夹'
+                return '不允许空名'
             }
+
             if saveName.hasMatch('[\\/:*?"<>|]') {
-                return '不能包含非法字符`n\/:*?"<>|'
+                return '包含非法字符'
             }
+            
             if not this.doSave(saveName, false, &saveMsg) {
-                if IsSet(saveMsg) and saveMsg {
+                if IsSet(saveMsg) and saveMsg
                     return saveMsg
-                }
             } else {
-                exitGuiWith(saveName ' - 已保存', 3)
+                this.app.exitGuiWith(saveName ' - 已保存', 3)
             }
         }
-        cmdMap['Enter'] := wrapCmd(gc, onEnter)
+        this.app.cmdMap['Enter'] := wrapCmd(gc, onEnter)
     }
 
+    ; GUI: 显示存档树
     showSaves(reload, selections*) {
-        if reload {
+        if reload
             this.load()
-        }
         size := this.entries.Length
         if size <= 1 {
             display('暂无备份')
             return
         }
+        
+        ; 检查未归档备份 (Bad Nodes)
         bad := this.entries.filter(e => e.Length < 3).mapOut(e => e[1])
         if bad.Length > 0 {
-            if popupYesNo('归档确认', '发现以下未归档备份：`n`n'
-                bad.join('`n', f => '- ' f) '`n`n'
-                '是否统一归档(Y)或删除(N)`n'
-                '归档后将按时间顺序视为连续继承')
-            {
+            if popupYesNo('归档确认', '发现未归档备份，是否统一归档(Y)或删除(N)?') {
                 bad.reverse().fold('', (parent, folder) => (
                     id := timeEncode(FileGetTime(this.target '\' folder)),
                     this.renameSave(folder, id, parent, folder),
@@ -264,12 +432,15 @@ class NonlinearBackup {
             display(msg, 3, true)
             return
         }
+
+        ; 构建树形结构文本 (Tree Building)
         rg := range(1, size - 1)
         parentArr := rg.mapOut(i => this.nodeIndexMap.Get(this.entries[i][2], size))
         childrenMap := rg.groupBy(itemGet(parentArr))
         tree := arrRepeatBy(size, () => arrRepeat(size, ' '))
 
         headIndex := this.nodeIndexMap.Get(this.loadHead(), 0)
+        
         fillNode(i, j) {
             tree[i][j] := headIndex == i ? '╪' : '┼'
             if not childrenMap.getVal(i, &children) {
@@ -308,11 +479,12 @@ class NonlinearBackup {
             }
             return a.reverse().join()
         }
+        
         rows := this.entries.mapIndexedOut((i, e) => [beautifyRow(tree[i]) ' ' e[3], readableTime(timeDecode(e[1]))])
 
-        global treeListView
-        treeListView := lv := listViewAll(['存档树', '时间'], rows, makeGlobalGui.Bind(this.getAppTitle()))
+        this.app.treeListView := lv := listViewAll(['存档树', '时间'], rows, makeGlobalGui.Bind(this.getAppTitle()))
         lv.OnEvent('DoubleClick', (gc, index) => index == size ? Run(this.target) : 0)
+        
         if selections.Length > 0 {
             for i in selections {
                 lvSelect(lv, i)
@@ -321,21 +493,31 @@ class NonlinearBackup {
             lvSelect(lv, headIndex or 1)
         }
 
+        ; === 绑定树操作事件 ===
+        
+        ; 回车：还原存档
         onEnter(lv) {
             selected := lvGetAllSelected(lv).toArr()
             if selected.Length == 1 {
                 index := selected[1]
                 if index < size {
-                    FileCopy(this.target '\' this.saves[index] '\*', this.src, true)
+                    ; 使用 DirCopy 覆盖源文件，保持目录结构
+                    backupPath := this.target '\' this.saves[index]
+                    try {
+                        DirCopy(backupPath, this.src, 1)
+                    } catch Error as e {
+                        return '还原失败: ' e.Message
+                    }
                     this.changeHead(index)
-                    exitGuiWith(this.entries[index][3] ' - 已载入', 3)
+                    this.app.exitGuiWith(this.entries[index][3] ' - 已还原', 3)
                 } else {
                     return '虚拟根节点'
                 }
             }
         }
-        cmdMap['Enter'] := wrapCmd(lv, onEnter)
+        this.app.cmdMap['Enter'] := wrapCmd(lv, onEnter)
 
+        ; 右键：修改父节点
         onRButton(lv) {
             selected := lvGetAllSelected(lv).toArr()
             if selected.Length == 2 {
@@ -349,24 +531,27 @@ class NonlinearBackup {
                 this.showSaves(false, i, j)
             }
         }
-        cmdMap['RButton'] := wrapCmd(lv, onRButton)
+        this.app.cmdMap['RButton'] := wrapCmd(lv, onRButton)
 
+        ; Ctrl+Up：跳到最新子节点
         onCtrlUp(lv) {
             index := lv.GetNext()
             if childrenMap.getVal(index, &cr) {
                 SendInput('{Up ' index - cr[1] '}')
             }
         }
-        cmdMap['CtrlUp'] := wrapCmd(lv, onCtrlUp)
+        this.app.cmdMap['CtrlUp'] := wrapCmd(lv, onCtrlUp)
 
+        ; Ctrl+Down：跳到父节点
         onCtrlDown(lv) {
             index := lv.GetNext()
             if index < size {
                 SendInput('{Down ' parentArr[index] - index '}')
             }
         }
-        cmdMap['CtrlDown'] := wrapCmd(lv, onCtrlDown)
+        this.app.cmdMap['CtrlDown'] := wrapCmd(lv, onCtrlDown)
 
+        ; Delete：删除存档 (逻辑包含树结构重组)
         onDel(lv) {
             selectionSet := lvGetAllSelected(lv).toSet()
             if selectionSet.Has(0) or selectionSet.Has(size) {
@@ -381,47 +566,57 @@ class NonlinearBackup {
                     }
                     if restChildren.Length > 1 {
                         selectionSet.consume(i => lvSelect(lv, i))
-                        return this.entries[index][3] ' 存在多个子节点 无法删除'
+                        return this.entries[index][3] ' 存在多个子节点，无法删除'
                     }
                     rest := restChildren[1]
                     newParentMap[rest] := moveUntil(rest, itemGet(parentArr), notIn(selectionSet))
                 }
             }
-            if not popupYesNo('删除存档', '是否删除存档：`n' selectionSet.join('`n', i => '- ' this.entries[i][3])) {
+            if not popupYesNo('删除存档', '是否删除以下存档？`n' selectionSet.join('`n', i => '- ' this.entries[i][3])) {
                 return
             }
+            
+            ; 移动 Head 指针
             if this.getIndex(this.loadHead(), &headIndex) {
                 headIndex := moveWhile(headIndex, itemGet(parentArr), isIn(selectionSet))
             }
+            
+            ; 物理删除
             for index in selectionSet {
-                DirDelete(this.target '\' this.saves[index], true)
+                try DirDelete(this.target '\' this.saves[index], true)
             }
+            
+            ; 重连父子关系
             for i, p in newParentMap {
                 if p < size {
                     this.changeParent(i, p)
                 }
             }
+            
             if IsSet(headIndex) {
                 this.changeHead(headIndex)
             }
-            exitGuiWith('存档已删除', 4)
+            
+            this.app.exitGuiWith('存档已删除', 4)
             this.showSaves(true, 1)
         }
-        cmdMap['Del'] := wrapCmd(lv, onDel)
+        this.app.cmdMap['Del'] := wrapCmd(lv, onDel)
     }
-
+    
+    ; 辅助：重命名/移动文件夹
     renameSave(from, id, parent, name) {
         DirMove(this.target '\' from, this.target '\' id '#' parent '#' name, 'R')
     }
 
+    ; 辅助：设置 Head 指针文件
     setHead(timestamp) {
         head := this.loadHead()
         if head {
             if timestamp != head {
                 try {
                     FileMove(this.target '\' head, this.target '\' timestamp)
-                } catch Error as e {
-                    display(head (FileExist(this.target '\' head) ? '存在' : '不存在') ' => ' timestamp)
+                } catch Error {
+                    ; 容错处理
                 }
             }
         } else {
@@ -443,53 +638,3 @@ class NonlinearBackup {
         }
     }
 }
-
-
-#HotIf WinActive(NonlinearBackup.appName ' ahk_class AutoHotkeyGUI')
-Enter:: cmdMap['Enter'].Call()
-^Up:: cmdMap['CtrlUp'].Call()
-^Down:: cmdMap['CtrlDown'].Call()
-Del:: cmdMap['Del'].Call()
-RButton:: cmdMap['RButton'].Call()
-F1:: {
-    g := makeGui('快捷键列表', g => g.Destroy())
-    g.SetFont('s9', 'consolas')
-    g.Opt('ToolWindow')
-    content := "
-    (
-        游戏或工作界面
-        Win+F5  : 重新加载配置
-        Win+F6  : 新建存档备份
-        Win+F7  : 打开存档树
-        Win+F8  : 获取当前程序名
-        Win+F9  : 获取当前窗口标题
-        
-        本应用界面
-        ESC     : 退出当前窗口
-        F1      : 快捷键列表
-        
-        存档树界面
-        ↑       : 向上（较新存档）
-        ↓       : 向下（较旧存档）
-        Ctrl+↑  : 向上跳转最新子节点
-        Ctrl+↓  : 向下跳转父节点
-        Enter   : 载入存档
-        Delete  : 删除存档
-        RButton : 重设父节点
-    )"
-    g.AddText('w195', content)
-    g.Show()
-}
-#HotIf
-
-runBackupHelper(action) {
-    proc := procName()
-    if procMap.getVal(proc, &config) {
-        if not config.getVal('title', &title) or not title or isWinTitleMatch(title) {
-            action(NonlinearBackup(proc, config))
-        }
-    }
-}
-
-#F6:: runBackupHelper(bh => bh.saveFiles())
-#F7:: runBackupHelper(bh => bh.showSaves(false))

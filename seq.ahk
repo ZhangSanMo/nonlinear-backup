@@ -1,4 +1,4 @@
-class StopError extends ValueError {
+﻿class StopError extends ValueError {
 }
 _stopError := StopError()
 
@@ -144,7 +144,7 @@ class Seq {
         fun(c) {
             this.consume(c)
             for t in a {
-                c(a)
+                c(t) ;
             }
         }
         return CallbackSeq(fun)
