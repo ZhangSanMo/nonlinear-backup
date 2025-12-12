@@ -5,6 +5,8 @@
 
 ; 初始化全局应用实例
 global App := BackupApp()
+; 设置ICON图标
+;@Ahk2Exe-SetMainIcon backup.ico
 
 ; ==============================================================================
 ; 快捷键定义 (Hotkeys)
@@ -546,13 +548,22 @@ class NonlinearBackup {
             if selected.Length == 1 {
                 index := selected[1]
                 if index < size {
-                    ; 使用 DirCopy 覆盖源文件，保持目录结构
                     backupPath := this.target '\' this.saves[index]
-                    try {
-                        DirCopy(backupPath, this.src, 1)
-                    } catch Error as e {
-                        return '还原失败: ' e.Message
+                    
+                    ; --- Robocopy 实现开始 ---
+                    ; /MIR : 镜像模式（会删除源目录中没有但目标目录中有的文件，完全还原状态，慎用！）
+                    ; /E   : 复制子目录，包括空的
+                    ; /IS  : 即使文件相同也覆盖
+                    ; /R:1 : 遇到错误重试 1 次
+                    ; /W:1 : 重试等待 1 秒
+                    exitCode := RunWait('robocopy "' backupPath '" "' this.src '" /E /IS /IT /R:1 /W:1', , "Hide")
+
+                    ; 关键点：Robocopy 只要返回值小于 8，都代表“成功”
+                    if (exitCode >= 8) {
+                        return '还原失败 (Robocopy代码 ' exitCode ')'
                     }
+                    ; --- Robocopy 实现结束 ---
+
                     this.changeHead(index)
                     this.app.exitGuiWith(this.entries[index][3] ' - 已还原', 3)
                 } else {
