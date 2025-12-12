@@ -39,6 +39,7 @@ class BackupApp {
     cmdMap := Map()
     procMap := Map()
     treeListView := ""
+    configLoaded := false ; 标记配置是否成功加载
 
     __New() {
         this.title := this.appName
@@ -54,7 +55,9 @@ class BackupApp {
     ; 加载并解析 backup.ini
     loadConfig() {
         if not FileExist(this.backupIni) {
-            fatalExit('同目录下缺失 "' this.backupIni '" 文件')
+            this.createDefaultConfig()
+            display('已生成默认配置文件: ' this.backupIni '`n请修改配置后按 Win+F5 重载', 5)
+            return ; 此时不加载，等待用户修改
         }
 
         ; 读取配置文件，按小节分组
@@ -73,8 +76,29 @@ class BackupApp {
         }
 
         if this.procMap.Count == 0 {
-            fatalExit('backup.ini 中无有效配置')
+            display('配置文件中无有效配置，请检查 ' this.backupIni, 3)
+            return
         }
+        
+        this.configLoaded := true
+    }
+    
+    ; 创建默认配置文件
+    createDefaultConfig() {
+        defaultContent := "
+        (
+        ; 示例配置
+        ; [进程名:存档名]
+        ; dir = 需要备份的文件夹路径 ({user} 代表当前用户名)
+        ; title = (可选) 窗口标题匹配规则，支持通配符*
+        ; pattern = (可选) 包含的文件规则，默认为*
+        
+        [Notepad:NewProject]
+        dir = C:\Users\{user}\Documents\TestSave
+        title = *无标题*
+        pattern = *.txt|*.log
+        )"
+        FileAppend(defaultContent, this.backupIni, "UTF-8")
     }
 
     ; 解析单个配置块 [Header]...
@@ -91,13 +115,12 @@ class BackupApp {
             
         ; 校验必要字段 dir
         if not configMap.getVal('dir', &dir) {
-            fatalExit('配置 [' fullSection '] 缺失存档路径 dir')
+            display('配置 [' fullSection '] 缺失必要的 dir 字段，已跳过', 3)
+            return [procName, Map()] ; 返回空Map稍后处理
         }
         
         dir := StrReplace(dir, '{user}', A_UserName)
-        if not FileExist(dir) {
-            fatalExit('存档路径不存在：' dir)
-        }
+        
         configMap['dir'] := dir
         configMap['section_name'] := fullSection
         
@@ -118,9 +141,16 @@ class BackupApp {
 
     ; 核心入口：根据当前环境选择配置并运行操作
     runHelper(action) {
-        proc := procName()
-        if not this.procMap.Has(proc)
+        if !this.configLoaded {
+            display('配置未加载或格式错误，请检查 ' this.backupIni, 2)
             return
+        }
+
+        proc := procName()
+        if not this.procMap.Has(proc) {
+            display('当前进程 [' proc '] 未在配置中找到', 1)
+            return
+        }
             
         configs := this.procMap[proc]
         targetConfig := unset
@@ -130,23 +160,35 @@ class BackupApp {
         ; 1. 优先匹配 match_title (支持正则/通配符)
         ; 2. 否则使用第一个没有 match_title 的配置作为默认
         for cfg in configs {
-            matchTitle := cfg.Get('match_title', '')
+            ; 跳过无效配置（比如之前解析失败返回空Map的）
+            if cfg.Count == 0 
+                continue
+
+            matchTitle := cfg.Get('title', '')
             if matchTitle != '' {
                 if activeTitle.isWildcardMatch(matchTitle) {
                     targetConfig := cfg
-                    break ; 找到精确匹配，立即停止
+                    break 
                 }
             } else if not IsSet(targetConfig) {
-                targetConfig := cfg ; 暂存默认配置
+                targetConfig := cfg 
             }
         }
         
         if IsSet(targetConfig) {
-             ; 兼容旧版 hotkey 限定逻辑 (如果配置了 title 字段)
+            ; 延迟检查：在实际要运行操作前，检查源目录是否存在
+            srcDir := targetConfig.Get('dir', '')
+            if !srcDir || !FileExist(srcDir) {
+                display('错误：待存档目录不存在`n' srcDir, 3)
+                return
+            }
+
             configTitle := targetConfig.Get('title', '')
             if not configTitle or activeTitle.isWildcardMatch(configTitle) {
                 action(NonlinearBackup(proc, targetConfig, this))
             }
+        } else {
+             display('未找到匹配当前窗口的配置', 1)
         }
     }
 
@@ -195,7 +237,6 @@ class NonlinearBackup {
         this.src := config['dir']
         
         ; 计算目标存储路径
-        ; 修改：添加 saveRoot 变量指向 Save 子文件夹
         saveRoot := A_WorkingDir '\Save'
         
         ; 如果配置头是 [Code:ProjectA]，文件夹名为 Code_ProjectA
@@ -250,6 +291,12 @@ class NonlinearBackup {
 
     ; 执行保存逻辑
     doSave(saveName, auto, &msg) {
+        ; 此处虽然外层已经检查过目录，但防止运行中被删除，可再做简单的容错
+        if !FileExist(this.src) {
+            msg := '源目录已失效'
+            return false
+        }
+
         ; 1. 递归扫描所有源文件
         allFiles := scanFiles(this.src, '*', 'FR')
         
@@ -317,8 +364,8 @@ class NonlinearBackup {
         
         return true
     }
-
-    ; 检查并设置自动备份
+    
+    ; ... (其余 NonlinearBackup 方法，checkAuto, saveFiles, showSaves 等保持原样，无需变动) ...
     checkAuto(saveName, &msg) {
         if not saveName.startsWith('=') {
             return false
@@ -372,7 +419,6 @@ class NonlinearBackup {
         return true
     }
 
-    ; GUI: 输入备份名
     saveFiles() {
         g := makeGlobalGui(this.getAppTitle(), '微软雅黑')
         gc := g.AddEdit('r1 w300', '新建备份')
@@ -402,7 +448,6 @@ class NonlinearBackup {
         this.app.cmdMap['Enter'] := wrapCmd(gc, onEnter)
     }
 
-    ; GUI: 显示存档树
     showSaves(reload, selections*) {
         if reload
             this.load()
